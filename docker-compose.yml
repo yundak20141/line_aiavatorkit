@@ -1,0 +1,83 @@
+# LINE AIAvatarKit Bot - Docker Compose設定
+#
+# 使用方法:
+#   開発環境起動:     docker-compose up -d
+#   ログ確認:         docker-compose logs -f
+#   停止:             docker-compose down
+#   再ビルド:         docker-compose up -d --build
+
+version: '3.8'
+
+services:
+  # === LINE Bot アプリケーション ===
+  line-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: line-aiavatar-bot
+    ports:
+      - "8080:8080"
+    environment:
+      # 環境変数は.envファイルから読み込み
+      - LINE_CHANNEL_ACCESS_TOKEN=${LINE_CHANNEL_ACCESS_TOKEN}
+      - LINE_CHANNEL_SECRET=${LINE_CHANNEL_SECRET}
+      - DIFY_API_KEY=${DIFY_API_KEY}
+      - DIFY_BASE_URL=${DIFY_BASE_URL}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - TTS_ENGINE=${TTS_ENGINE:-VOICEVOX}
+      # VOICEVOX設定 (Docker内ではサービス名で参照)
+      - VOICEVOX_BASE_URL=http://voicevox-engine:50021
+      - VOICEVOX_SPEAKER_ID=${VOICEVOX_SPEAKER_ID:-46}
+      # Cartesia設定 (オプション)
+      - CARTESIA_API_KEY=${CARTESIA_API_KEY:-}
+      - CARTESIA_VOICE_ID=${CARTESIA_VOICE_ID:-}
+      # Style-Bert-VITS2設定 (オプション)
+      - STYLE_BERT_VITS2_BASE_URL=${STYLE_BERT_VITS2_BASE_URL:-}
+    depends_on:
+      voicevox-engine:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - aiavatar-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # === VOICEVOX Engine ===
+  # 日本語音声合成エンジン
+  # 公式イメージ: https://hub.docker.com/r/voicevox/voicevox_engine
+  voicevox-engine:
+    image: voicevox/voicevox_engine:cpu-ubuntu20.04-latest
+    container_name: voicevox-engine
+    ports:
+      - "50021:50021"
+    # GPU使用時は以下のコメントを解除
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    environment:
+      - VV_CPU_NUM_THREADS=4
+    restart: unless-stopped
+    networks:
+      - aiavatar-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:50021/speakers"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s  # VOICEVOXは起動に時間がかかる
+
+networks:
+  aiavatar-network:
+    driver: bridge
+
+# ボリューム設定（必要に応じて追加）
+# volumes:
+#   voicevox-data:

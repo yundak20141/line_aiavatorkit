@@ -1,0 +1,19 @@
+# Web framework
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+
+# Environment variables
+python-dotenv>=1.0.0
+
+# AIAvatarKit - メインのAIアバターフレームワーク
+aiavatar-kit>=0.1.0
+
+# LINE Bot SDK
+line-bot-sdk>=3.0.0
+
+# OpenAI API (Whisper音声認識用)
+openai>=1.0.0
+
+# HTTP client
+httpx>=0.25.0
+aiohttp>=3.9.0
