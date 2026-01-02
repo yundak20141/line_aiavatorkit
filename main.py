@@ -1,11 +1,13 @@
 """
-LINE AIAvatarKit Bot - メインアプリケーション
+LINE AIAvatarKit Bot - メインアプリケーション (v0.8.2対応)
 
 このファイルは以下の機能を提供します:
-- LINE Messaging APIとの連携
-- Dify LLMサービスとの連携
-- 複数TTSエンジン（VOICEVOX, Cartesia, Style-Bert-VITS2）の切り替え
+- LINE Messaging APIとの連携（自動Webhookエンドポイント生成）
+- 複数LLMエンジン対応（Dify, ChatGPT, Claude）
+- 複数TTSエンジン対応（VOICEVOX, OpenAI TTS, Cartesia, Style-Bert-VITS2）
 - OpenAI Whisperによる音声認識
+- WebSocketによるリアルタイム音声対話（オプション）
+- Adapterコールバックによる柔軟なセッション管理
 
 参考: https://github.com/uezo/aiavatarkit
 """
@@ -13,68 +15,200 @@ LINE AIAvatarKit Bot - メインアプリケーション
 import os
 import logging
 from typing import Optional
-from dotenv import load_dotenv
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse
+from contextlib import asynccontextmanager
 
-# ログ設定
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+from dotenv import load_dotenv
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 
 # .envファイルから環境変数を読み込む
 load_dotenv()
 
-# --- AIAvatarKitのインポート ---
-# 注意: パッケージのバージョンによりインポートパスが異なる場合があります
+# --- pydantic-settingsによる設定管理 ---
 try:
-    # AIAvatarKitの主要コンポーネントをインポート
-    from aiavatar.bots.line import AIAvatarLineBotServer
-    from aiavatar.llms.dify import DifyService
-    from aiavatar.speech.openai import OpenAISpeechRecognizer
-    from aiavatar.speech.voicevox import VoicevoxSpeechSynthesizer
-    from aiavatar.speech.base import create_instant_synthesizer, SpeechSynthesizer
+    from pydantic_settings import BaseSettings
+
+    class Settings(BaseSettings):
+        """アプリケーション設定（環境変数から自動読み込み）"""
+        # LINE Messaging API
+        line_channel_access_token: str = ""
+        line_channel_secret: str = ""
+
+        # OpenAI API (STT/LLM/TTS共通)
+        openai_api_key: str = ""
+
+        # LLM選択 (DIFY, CHATGPT, CLAUDE)
+        llm_type: str = "DIFY"
+
+        # Dify設定
+        dify_api_key: Optional[str] = None
+        dify_base_url: str = "https://api.dify.ai/v1"
+        dify_user: str = "line_user"
+        dify_is_agent_mode: bool = True
+
+        # ChatGPT設定
+        openai_model: str = "gpt-4o"
+        openai_temperature: float = 0.7
+
+        # TTS選択 (VOICEVOX, OPENAI, CARTESIA, STYLE_BERT_VITS2)
+        tts_engine: str = "VOICEVOX"
+
+        # VOICEVOX設定
+        voicevox_base_url: str = "http://voicevox-engine:50021"
+        voicevox_speaker_id: int = 46
+
+        # OpenAI TTS設定
+        openai_tts_model: str = "tts-1"
+        openai_tts_voice: str = "nova"
+
+        # Cartesia設定
+        cartesia_api_key: Optional[str] = None
+        cartesia_voice_id: Optional[str] = None
+
+        # Style-Bert-VITS2設定
+        style_bert_vits2_base_url: str = "http://127.0.0.1:5000/voice"
+
+        # システムプロンプト
+        system_prompt: str = "あなたは親切で丁寧なAIアシスタントです。日本語で応答してください。"
+
+        # WebSocket設定
+        enable_websocket: bool = False
+
+        # デバッグ設定
+        debug: bool = False
+
+        class Config:
+            env_file = ".env"
+            extra = "ignore"
+
+    settings = Settings()
+    PYDANTIC_AVAILABLE = True
+except ImportError:
+    PYDANTIC_AVAILABLE = False
+    settings = None
+
+# --- ログ設定 ---
+log_level = logging.DEBUG if (settings and settings.debug) else logging.INFO
+logging.basicConfig(
+    level=log_level,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# 設定の取得ヘルパー関数
+def get_env(key: str, default: str = "") -> str:
+    """環境変数を取得（pydantic-settings非対応時のフォールバック）"""
+    if PYDANTIC_AVAILABLE and settings:
+        return getattr(settings, key.lower(), os.environ.get(key, default))
+    return os.environ.get(key, default)
+
+# --- AIAvatarKit v0.8.2のインポート ---
+AIAVATAR_AVAILABLE = False
+bot_server = None
+ws_server = None
+
+try:
+    # LINE Bot Adapter
+    from aiavatar.adapter.linebot.server import AIAvatarLineBotServer
+
+    # LLMサービス
+    from aiavatar.sts.llm.dify import DifyService
+    from aiavatar.sts.llm.chatgpt import ChatGPTLLMService
+
+    # TTSサービス
+    from aiavatar.sts.tts.voicevox import VoicevoxSpeechSynthesizer
+    from aiavatar.sts.tts.openai import OpenAISpeechSynthesizer
+    from aiavatar.sts.tts.base import create_instant_synthesizer
+
+    # STTサービス
+    from aiavatar.sts.stt.openai import OpenAISpeechRecognizer
+
+    # WebSocket Adapter（オプション）
+    try:
+        from aiavatar.adapter.websocket.server import AIAvatarWebSocketServer
+        WEBSOCKET_AVAILABLE = True
+    except ImportError:
+        WEBSOCKET_AVAILABLE = False
+        logger.info("WebSocket Adapter not available")
+
     AIAVATAR_AVAILABLE = True
+    logger.info("AIAvatarKit v0.8.2+ successfully imported")
+
 except ImportError as e:
     logger.warning(f"AIAvatarKit import failed: {e}")
     logger.warning("Running in demo mode without AIAvatarKit")
-    AIAVATAR_AVAILABLE = False
-    SpeechSynthesizer = object  # Placeholder for type hints
+    WEBSOCKET_AVAILABLE = False
 
 
-def get_speech_synthesizer() -> Optional[object]:
-    """
-    .envのTTS_ENGINE設定に応じて、対応するTTSインスタンスを返すファクトリ関数
-
-    サポートするTTSエンジン:
-    - VOICEVOX: ローカルまたはDockerコンテナで動作する無料の日本語TTS
-    - CARTESIA: クラウドベースのTTSサービス
-    - STYLE_BERT_VITS2: 高品質な日本語TTS（自前でサーバー構築が必要）
-    """
+# --- LLMサービスのファクトリ関数 ---
+def get_llm_service():
+    """LLM_TYPE設定に応じてLLMサービスを初期化"""
     if not AIAVATAR_AVAILABLE:
         return None
 
-    engine = os.environ.get("TTS_ENGINE", "VOICEVOX").upper()
+    llm_type = get_env("LLM_TYPE", "DIFY").upper()
+    logger.info(f"Selected LLM: {llm_type}")
+
+    if llm_type == "DIFY":
+        dify_api_key = get_env("DIFY_API_KEY")
+        if not dify_api_key or dify_api_key.startswith("your_"):
+            raise ValueError("DIFY_API_KEY must be set for Dify LLM")
+
+        return DifyService(
+            api_key=dify_api_key,
+            base_url=get_env("DIFY_BASE_URL", "https://api.dify.ai/v1"),
+            user=get_env("DIFY_USER", "line_user"),
+            is_agent_mode=get_env("DIFY_IS_AGENT_MODE", "true").lower() == "true"
+        )
+
+    elif llm_type == "CHATGPT":
+        openai_api_key = get_env("OPENAI_API_KEY")
+        if not openai_api_key or openai_api_key.startswith("your_"):
+            raise ValueError("OPENAI_API_KEY must be set for ChatGPT LLM")
+
+        return ChatGPTLLMService(
+            openai_api_key=openai_api_key,
+            model=get_env("OPENAI_MODEL", "gpt-4o"),
+            temperature=float(get_env("OPENAI_TEMPERATURE", "0.7")),
+            system_prompt=get_env("SYSTEM_PROMPT", "あなたは親切なAIアシスタントです。")
+        )
+
+    else:
+        raise ValueError(f"Unsupported LLM_TYPE: {llm_type}. Supported: DIFY, CHATGPT")
+
+
+# --- TTSサービスのファクトリ関数 ---
+def get_speech_synthesizer():
+    """TTS_ENGINE設定に応じてTTSサービスを初期化"""
+    if not AIAVATAR_AVAILABLE:
+        return None
+
+    engine = get_env("TTS_ENGINE", "VOICEVOX").upper()
     logger.info(f"Selected TTS Engine: {engine}")
 
     if engine == "VOICEVOX":
-        # ローカルまたはDockerのVOICEVOXエンジンを使用
-        # Docker Compose使用時: VOICEVOX_BASE_URL=http://voicevox-engine:50021
-        # ローカル使用時: VOICEVOX_BASE_URL=http://127.0.0.1:50021
         return VoicevoxSpeechSynthesizer(
-            base_url=os.environ.get("VOICEVOX_BASE_URL", "http://voicevox-engine:50021"),
-            speaker=int(os.environ.get("VOICEVOX_SPEAKER_ID", "46"))
+            base_url=get_env("VOICEVOX_BASE_URL", "http://voicevox-engine:50021"),
+            speaker=int(get_env("VOICEVOX_SPEAKER_ID", "46"))
+        )
+
+    elif engine == "OPENAI":
+        openai_api_key = get_env("OPENAI_API_KEY")
+        if not openai_api_key or openai_api_key.startswith("your_"):
+            raise ValueError("OPENAI_API_KEY must be set for OpenAI TTS")
+
+        return OpenAISpeechSynthesizer(
+            openai_api_key=openai_api_key,
+            model=get_env("OPENAI_TTS_MODEL", "tts-1"),
+            voice=get_env("OPENAI_TTS_VOICE", "nova")
         )
 
     elif engine == "CARTESIA":
-        # Cartesia APIを使用 (HTTPベースのTTS)
-        cartesia_api_key = os.environ.get("CARTESIA_API_KEY")
-        cartesia_voice_id = os.environ.get("CARTESIA_VOICE_ID")
+        cartesia_api_key = get_env("CARTESIA_API_KEY")
+        cartesia_voice_id = get_env("CARTESIA_VOICE_ID")
 
         if not cartesia_api_key or not cartesia_voice_id:
-            raise ValueError("CARTESIA_API_KEY and CARTESIA_VOICE_ID must be set for Cartesia TTS")
+            raise ValueError("CARTESIA_API_KEY and CARTESIA_VOICE_ID must be set")
 
         return create_instant_synthesizer(
             method="POST",
@@ -91,8 +225,7 @@ def get_speech_synthesizer() -> Optional[object]:
         )
 
     elif engine == "STYLE_BERT_VITS2":
-        # Style-Bert-VITS2のAPIを使用 (HTTPベースのTTS)
-        base_url = os.environ.get("STYLE_BERT_VITS2_BASE_URL", "http://127.0.0.1:5000/voice")
+        base_url = get_env("STYLE_BERT_VITS2_BASE_URL", "http://127.0.0.1:5000/voice")
 
         return create_instant_synthesizer(
             method="POST",
@@ -105,67 +238,127 @@ def get_speech_synthesizer() -> Optional[object]:
         )
 
     else:
-        raise ValueError(f"Unsupported TTS_ENGINE: {engine}. Supported: VOICEVOX, CARTESIA, STYLE_BERT_VITS2")
+        raise ValueError(f"Unsupported TTS_ENGINE: {engine}. Supported: VOICEVOX, OPENAI, CARTESIA, STYLE_BERT_VITS2")
+
+
+# --- STTサービスのファクトリ関数 ---
+def get_speech_recognizer():
+    """STTサービス（OpenAI Whisper）を初期化"""
+    if not AIAVATAR_AVAILABLE:
+        return None
+
+    openai_api_key = get_env("OPENAI_API_KEY")
+    if not openai_api_key or openai_api_key.startswith("your_"):
+        return None
+
+    return OpenAISpeechRecognizer(
+        openai_api_key=openai_api_key,
+        language="ja"  # 日本語優先
+    )
+
+
+# --- FastAPIアプリケーションのライフサイクル ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """アプリケーションの起動・終了時の処理"""
+    global bot_server, ws_server
+
+    if AIAVATAR_AVAILABLE:
+        try:
+            # 必須環境変数のチェック
+            line_token = get_env("LINE_CHANNEL_ACCESS_TOKEN")
+            line_secret = get_env("LINE_CHANNEL_SECRET")
+            openai_key = get_env("OPENAI_API_KEY")
+
+            missing_vars = []
+            if not line_token or line_token.startswith("your_") or line_token.startswith("YOUR_"):
+                missing_vars.append("LINE_CHANNEL_ACCESS_TOKEN")
+            if not line_secret or line_secret.startswith("your_") or line_secret.startswith("YOUR_"):
+                missing_vars.append("LINE_CHANNEL_SECRET")
+            if not openai_key or openai_key.startswith("your_") or openai_key.startswith("YOUR_"):
+                missing_vars.append("OPENAI_API_KEY")
+
+            if missing_vars:
+                logger.warning(f"Missing or placeholder environment variables: {missing_vars}")
+                logger.warning("Bot server will not be initialized. Please set all required API keys in .env file.")
+            else:
+                # コンポーネントの初期化
+                llm_service = get_llm_service()
+                tts_service = get_speech_synthesizer()
+                stt_service = get_speech_recognizer()
+
+                # LINE Bot Adapterの初期化（v0.8.2形式）
+                bot_server = AIAvatarLineBotServer(
+                    channel_access_token=line_token,
+                    channel_secret=line_secret,
+                    openai_api_key=openai_key,
+                    llm=llm_service,
+                    tts=tts_service,
+                    stt=stt_service,
+                    system_prompt=get_env("SYSTEM_PROMPT", "あなたは親切なAIアシスタントです。"),
+                    debug=get_env("DEBUG", "false").lower() == "true"
+                )
+
+                # APIルーターを登録（/webhook エンドポイントが自動生成される）
+                app.include_router(bot_server.get_api_router())
+                logger.info("LINE Bot Adapter initialized - Webhook endpoint: POST /webhook")
+
+                # Adapterコールバックの登録
+                @bot_server.edit_linebot_session
+                async def edit_session(linebot_session):
+                    """LINEユーザーIDをアプリ独自IDにマッピング"""
+                    linebot_session.user_id = f"line_{linebot_session.linebot_user_id}"
+                    logger.debug(f"Session mapped: LINE {linebot_session.linebot_user_id} -> {linebot_session.user_id}")
+
+                @bot_server.preprocess_request
+                async def log_request(request, session):
+                    """リクエストのログ出力"""
+                    logger.info(f"Incoming request from user: {session.user_id}")
+
+                # WebSocket Adapterの初期化（オプション）
+                if WEBSOCKET_AVAILABLE and get_env("ENABLE_WEBSOCKET", "false").lower() == "true":
+                    ws_server = AIAvatarWebSocketServer(
+                        openai_api_key=openai_key,
+                        llm=llm_service,
+                        tts=tts_service,
+                        stt=stt_service,
+                        system_prompt=get_env("SYSTEM_PROMPT", "あなたは親切なAIアシスタントです。"),
+                        debug=get_env("DEBUG", "false").lower() == "true"
+                    )
+                    app.include_router(ws_server.get_websocket_router())
+                    logger.info("WebSocket Adapter initialized - Endpoint: WS /ws")
+
+        except Exception as e:
+            logger.error(f"Failed to initialize adapters: {e}", exc_info=True)
+
+    yield
+
+    # シャットダウン処理
+    logger.info("Shutting down...")
 
 
 # --- FastAPIアプリケーションの初期化 ---
 app = FastAPI(
     title="LINE AIAvatarKit Bot",
-    description="LINE Messaging APIとAIAvatarKitを連携したAIボット",
-    version="1.0.0"
+    description="LINE Messaging API + AIAvatarKit v0.8.2 integration",
+    version="2.0.0",
+    lifespan=lifespan
 )
 
-# グローバル変数としてbot_serverを初期化
-bot_server = None
 
-if AIAVATAR_AVAILABLE:
-    try:
-        # 必須環境変数のチェック
-        required_vars = [
-            "LINE_CHANNEL_ACCESS_TOKEN",
-            "LINE_CHANNEL_SECRET",
-            "DIFY_API_KEY",
-            "OPENAI_API_KEY"
-        ]
-
-        missing_vars = [var for var in required_vars if not os.environ.get(var) or os.environ.get(var).startswith("YOUR_")]
-
-        if missing_vars:
-            logger.warning(f"Missing or placeholder environment variables: {missing_vars}")
-            logger.warning("Bot server will not be initialized. Please set all required API keys in .env file.")
-        else:
-            # Dify LLMサービスを初期化
-            dify_service = DifyService(
-                api_key=os.environ["DIFY_API_KEY"],
-                base_url=os.environ.get("DIFY_BASE_URL", "https://api.dify.ai/v1/chat-messages")
-            )
-
-            # AIAvatarKitのLINEボットサーバーを初期化
-            bot_server = AIAvatarLineBotServer(
-                line_channel_access_token=os.environ["LINE_CHANNEL_ACCESS_TOKEN"],
-                line_channel_secret=os.environ["LINE_CHANNEL_SECRET"],
-                llm_service=dify_service,
-                speech_synthesizer=get_speech_synthesizer(),
-                speech_recognizer=OpenAISpeechRecognizer(api_key=os.environ["OPENAI_API_KEY"])
-            )
-            logger.info("Bot server initialized successfully")
-
-    except Exception as e:
-        logger.error(f"Failed to initialize bot server: {e}")
-        bot_server = None
-
-
-# --- エンドポイント定義 ---
-
+# --- ヘルスチェックエンドポイント ---
 @app.get("/")
 async def root():
-    """ヘルスチェック用のルートエンドポイント"""
-    tts_engine = os.environ.get("TTS_ENGINE", "VOICEVOX")
+    """ルートエンドポイント（サーバー状態確認）"""
     return {
-        "message": f"AIAvatarKit LINE Bot Server is running",
-        "tts_engine": tts_engine,
+        "message": "AIAvatarKit LINE Bot Server is running",
+        "version": "2.0.0",
         "aiavatar_available": AIAVATAR_AVAILABLE,
-        "bot_initialized": bot_server is not None
+        "pydantic_settings": PYDANTIC_AVAILABLE,
+        "line_bot_initialized": bot_server is not None,
+        "websocket_initialized": ws_server is not None,
+        "llm_type": get_env("LLM_TYPE", "DIFY"),
+        "tts_engine": get_env("TTS_ENGINE", "VOICEVOX")
     }
 
 
@@ -173,38 +366,39 @@ async def root():
 async def health_check():
     """詳細なヘルスチェックエンドポイント"""
     return {
-        "status": "healthy",
-        "aiavatar_available": AIAVATAR_AVAILABLE,
-        "bot_initialized": bot_server is not None,
-        "tts_engine": os.environ.get("TTS_ENGINE", "VOICEVOX"),
-        "voicevox_url": os.environ.get("VOICEVOX_BASE_URL", "not set")
+        "status": "healthy" if bot_server else "degraded",
+        "components": {
+            "aiavatar": AIAVATAR_AVAILABLE,
+            "line_bot": bot_server is not None,
+            "websocket": ws_server is not None
+        },
+        "config": {
+            "llm_type": get_env("LLM_TYPE", "DIFY"),
+            "tts_engine": get_env("TTS_ENGINE", "VOICEVOX"),
+            "voicevox_url": get_env("VOICEVOX_BASE_URL", "not set"),
+            "debug": get_env("DEBUG", "false")
+        }
     }
 
 
+# --- 後方互換性のための/callbackエンドポイント ---
+# 注意: v0.8.2では /webhook が自動生成されますが、既存の設定との互換性のため残しています
 @app.post("/callback")
-async def handle_callback(request: Request):
+async def callback_redirect():
     """
-    LINE Webhook用のエンドポイント
+    レガシーWebhookエンドポイント
 
-    LINE Developersコンソールで設定するWebhook URL:
-    - ローカル開発時: https://<ngrok-url>/callback
-    - 本番環境: https://<your-domain>/callback
+    注意: v0.8.2では /webhook が推奨されます。
+    LINE Developersコンソールで /webhook に変更してください。
     """
-    if bot_server is None:
-        logger.error("Bot server not initialized - check your API keys in .env file")
-        return JSONResponse(
-            status_code=503,
-            content={
-                "error": "Bot server not initialized",
-                "message": "Please check your API keys in .env file"
-            }
-        )
-
-    try:
-        return await bot_server.handle_request(request)
-    except Exception as e:
-        logger.error(f"Error handling callback: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    return JSONResponse(
+        status_code=301,
+        content={
+            "message": "Please use /webhook instead of /callback",
+            "new_endpoint": "/webhook"
+        },
+        headers={"Location": "/webhook"}
+    )
 
 
 # --- 開発時のサーバー起動用 ---
@@ -219,5 +413,5 @@ if __name__ == "__main__":
         "main:app",
         host=host,
         port=port,
-        reload=True  # 開発時は自動リロード有効
+        reload=True
     )

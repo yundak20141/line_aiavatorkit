@@ -1,19 +1,32 @@
-# Web framework
-fastapi>=0.104.0
-uvicorn[standard]>=0.24.0
+# ========================================
+# LINE AIAvatarKit Bot - Dependencies
+# Python 3.10+ required
+# ========================================
 
-# Environment variables
+# --- Core Web Framework ---
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+
+# --- Configuration Management ---
 python-dotenv>=1.0.0
+pydantic-settings>=2.2.0
 
-# AIAvatarKit - メインのAIアバターフレームワーク
-aiavatar-kit>=0.1.0
+# --- AIAvatarKit (v0.8.2以上必須) ---
+# 正しいインポートパス: aiavatar.adapter.linebot.server
+aiavatar-kit>=0.8.2
 
-# LINE Bot SDK
-line-bot-sdk>=3.0.0
+# --- Speech Components ---
+# VAD (Voice Activity Detection)
+silero-vad>=5.0.0
 
-# OpenAI API (Whisper音声認識用)
-openai>=1.0.0
+# OpenAI API (STT: Whisper, LLM: ChatGPT, TTS)
+openai>=1.16.0
 
-# HTTP client
-httpx>=0.25.0
+# --- HTTP Client ---
+httpx>=0.27.0
 aiohttp>=3.9.0
+aiofiles>=24.1.0
+
+# --- Audio Processing (optional, for local usage) ---
+# PyAudio>=0.2.14  # Uncomment for local microphone support
+# numpy>=2.2.0     # Required if using PyAudio
