@@ -1,15 +1,33 @@
 # LINE AIAvatarKit Bot - Docker Compose設定
 #
+# ========================================
+# 構成図:
+#   [Dify Cloud] ←API→ [Docker Container (Python/FastAPI)] ←Webhook→ [LINE Platform]
+#                              ↑
+#                     ローカルでもGCPでも同じイメージ
+# ========================================
+#
 # 使用方法:
-#   開発環境起動:     docker-compose up -d
-#   ログ確認:         docker-compose logs -f
-#   停止:             docker-compose down
-#   再ビルド:         docker-compose up -d --build
+#   最小構成（Dify Cloud + OpenAI TTS）:
+#     docker-compose up -d line-bot
+#
+#   フル構成（VOICEVOX使用時）:
+#     docker-compose --profile voicevox up -d
+#
+#   ログ確認:
+#     docker-compose logs -f
+#
+#   停止:
+#     docker-compose down
+#
+#   再ビルド:
+#     docker-compose up -d --build line-bot
 
 version: '3.8'
 
 services:
   # === LINE Bot アプリケーション ===
+  # Dify Cloud + OpenAI TTS使用時はこれだけで動作
   line-bot:
     build:
       context: .
@@ -17,25 +35,42 @@ services:
     container_name: line-aiavatar-bot
     ports:
       - "8080:8080"
+    env_file:
+      - .env
     environment:
-      # 環境変数は.envファイルから読み込み
+      # === LINE Messaging API ===
       - LINE_CHANNEL_ACCESS_TOKEN=${LINE_CHANNEL_ACCESS_TOKEN}
       - LINE_CHANNEL_SECRET=${LINE_CHANNEL_SECRET}
-      - DIFY_API_KEY=${DIFY_API_KEY}
-      - DIFY_BASE_URL=${DIFY_BASE_URL}
+
+      # === OpenAI API (STT必須) ===
       - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - TTS_ENGINE=${TTS_ENGINE:-VOICEVOX}
-      # VOICEVOX設定 (Docker内ではサービス名で参照)
-      - VOICEVOX_BASE_URL=http://voicevox-engine:50021
+
+      # === LLM設定 ===
+      - LLM_TYPE=${LLM_TYPE:-DIFY}
+      - DIFY_API_KEY=${DIFY_API_KEY}
+      - DIFY_BASE_URL=${DIFY_BASE_URL:-https://api.dify.ai/v1}
+      - DIFY_USER=${DIFY_USER:-line_user}
+      - DIFY_IS_AGENT_MODE=${DIFY_IS_AGENT_MODE:-true}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o}
+      - OPENAI_TEMPERATURE=${OPENAI_TEMPERATURE:-0.7}
+
+      # === TTS設定 ===
+      - TTS_ENGINE=${TTS_ENGINE:-OPENAI}
+      # VOICEVOX (profile=voicevox時のみ有効)
+      - VOICEVOX_BASE_URL=${VOICEVOX_BASE_URL:-http://voicevox-engine:50021}
       - VOICEVOX_SPEAKER_ID=${VOICEVOX_SPEAKER_ID:-46}
-      # Cartesia設定 (オプション)
+      # OpenAI TTS
+      - OPENAI_TTS_MODEL=${OPENAI_TTS_MODEL:-tts-1}
+      - OPENAI_TTS_VOICE=${OPENAI_TTS_VOICE:-nova}
+      # Cartesia (オプション)
       - CARTESIA_API_KEY=${CARTESIA_API_KEY:-}
       - CARTESIA_VOICE_ID=${CARTESIA_VOICE_ID:-}
-      # Style-Bert-VITS2設定 (オプション)
-      - STYLE_BERT_VITS2_BASE_URL=${STYLE_BERT_VITS2_BASE_URL:-}
-    depends_on:
-      voicevox-engine:
-        condition: service_healthy
+
+      # === システム設定 ===
+      - SYSTEM_PROMPT=${SYSTEM_PROMPT:-あなたは親切なAIアシスタントです。}
+      - ENABLE_WEBSOCKET=${ENABLE_WEBSOCKET:-false}
+      - DEBUG=${DEBUG:-false}
+
     restart: unless-stopped
     networks:
       - aiavatar-network
@@ -46,12 +81,14 @@ services:
       retries: 3
       start_period: 10s
 
-  # === VOICEVOX Engine ===
-  # 日本語音声合成エンジン
-  # 公式イメージ: https://hub.docker.com/r/voicevox/voicevox_engine
+  # === VOICEVOX Engine (オプション) ===
+  # TTS_ENGINE=VOICEVOX の場合のみ必要
+  # 起動: docker-compose --profile voicevox up -d
   voicevox-engine:
     image: voicevox/voicevox_engine:cpu-ubuntu20.04-latest
     container_name: voicevox-engine
+    profiles:
+      - voicevox
     ports:
       - "50021:50021"
     # GPU使用時は以下のコメントを解除
@@ -72,12 +109,8 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 60s  # VOICEVOXは起動に時間がかかる
+      start_period: 60s
 
 networks:
   aiavatar-network:
     driver: bridge
-
-# ボリューム設定（必要に応じて追加）
-# volumes:
-#   voicevox-data:

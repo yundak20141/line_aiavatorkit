@@ -12,6 +12,44 @@ AIAvatarKit v0.8.2の最新機能を活用し、複数のLLM/TTSエンジンに�
 - **AIAvatarKit**: v0.8.2対応
 - **アプリバージョン**: 2.0.0
 
+## システム構成図
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         クラウドサービス                              │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐             │
+│  │ Dify Cloud  │    │ OpenAI API  │    │    LINE     │             │
+│  │ (LLM)       │    │ (STT/TTS)   │    │  Platform   │             │
+│  └──────┬──────┘    └──────┬──────┘    └──────┬──────┘             │
+└─────────┼──────────────────┼──────────────────┼─────────────────────┘
+          │ API              │ API              │ Webhook
+          ▼                  ▼                  ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                    Docker Container                                  │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │                    Python / FastAPI                            │  │
+│  │  ┌─────────────────────────────────────────────────────────┐  │  │
+│  │  │              AIAvatarKit v0.8.2                          │  │  │
+│  │  │  • LINE Bot Adapter (自動Webhook生成)                    │  │  │
+│  │  │  • LLM Service (Dify/ChatGPT切り替え)                    │  │  │
+│  │  │  • TTS Service (OpenAI/VOICEVOX切り替え)                 │  │  │
+│  │  │  • STT Service (OpenAI Whisper)                          │  │  │
+│  │  └─────────────────────────────────────────────────────────┘  │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+│                              ↑                                       │
+│                    ローカルでもGCPでも同じイメージ                   │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+## Dockerを仮想環境として使うメリット
+
+| メリット | 説明 |
+|----------|------|
+| **環境の再現性** | ローカルで動いたものがGCPでも確実に動く |
+| **依存関係の隔離** | Python/ライブラリのバージョン競合を防止 |
+| **デプロイの簡素化** | `docker push` → GCP Cloud Runで即デプロイ |
+| **チーム開発** | 「自分のPCでは動く」問題を根絶 |
+
 ## プロジェクト構成
 
 ```
@@ -73,7 +111,7 @@ from aiavatar.adapter.websocket.server import AIAvatarWebSocketServer
 ### 3. Docker環境
 
 - **line-bot**: メインのLINEボットアプリケーション
-- **voicevox-engine**: 日本語音声合成エンジン（VOICEVOXの公式Dockerイメージ使用）
+- **voicevox-engine**: 日本語音声合成エンジン（オプション、profiles機能で選択）
 
 ### 4. LLM/TTS切り替え方式
 
@@ -85,8 +123,8 @@ LLM_TYPE="DIFY"      # デフォルト（Difyエージェント）
 LLM_TYPE="CHATGPT"   # OpenAI ChatGPT
 
 # TTS選択
-TTS_ENGINE="VOICEVOX"         # デフォルト
-TTS_ENGINE="OPENAI"           # OpenAI TTS
+TTS_ENGINE="OPENAI"           # デフォルト（推奨: 追加サーバー不要）
+TTS_ENGINE="VOICEVOX"         # 日本語特化
 TTS_ENGINE="CARTESIA"         # Cartesia
 TTS_ENGINE="STYLE_BERT_VITS2" # Style-Bert-VITS2
 ```
@@ -130,8 +168,13 @@ cp .env.example .env
 #### Step 2: Dockerコンテナの起動
 
 ```bash
-# コンテナをビルドして起動
-docker-compose up -d --build
+# === 最小構成（Dify Cloud + OpenAI TTS）===
+# 推奨: 追加サーバー不要、すぐに動作
+docker-compose up -d --build line-bot
+
+# === VOICEVOX使用時 ===
+# 日本語特化の高品質TTS
+docker-compose --profile voicevox up -d --build
 
 # ログを確認
 docker-compose logs -f
@@ -165,8 +208,12 @@ ngrok http 8080
 ## コンテナ操作コマンド
 
 ```bash
-# 起動
-docker-compose up -d
+# === 基本操作 ===
+# 起動（最小構成）
+docker-compose up -d line-bot
+
+# 起動（VOICEVOX付き）
+docker-compose --profile voicevox up -d
 
 # 停止
 docker-compose down
@@ -174,15 +221,16 @@ docker-compose down
 # ログ確認
 docker-compose logs -f
 
+# 再ビルド
+docker-compose up -d --build line-bot
+
+# === デバッグ ===
+# コンテナ内でシェル実行
+docker-compose exec line-bot /bin/bash
+
 # 特定サービスのログ
 docker-compose logs -f line-bot
 docker-compose logs -f voicevox-engine
-
-# 再ビルド
-docker-compose up -d --build
-
-# コンテナ内でシェル実行
-docker-compose exec line-bot /bin/bash
 ```
 
 ## ヘルスチェック
@@ -192,7 +240,7 @@ docker-compose exec line-bot /bin/bash
 curl http://localhost:8080/
 curl http://localhost:8080/health
 
-# VOICEVOXエンジンの確認
+# VOICEVOXエンジンの確認（VOICEVOX使用時のみ）
 curl http://localhost:50021/speakers
 ```
 
@@ -254,6 +302,8 @@ v0.8.2では `/webhook` が推奨されます。古い `/callback` を使用し�
 - OpenAI TTS追加
 - pydantic-settingsによる設定管理
 - WebSocket Adapter対応（オプション）
+- Docker Compose profiles機能でVOICEVOXをオプション化
+- デフォルトTTSをOpenAI TTSに変更（追加サーバー不要）
 
 ### v1.0.0 (2026-01-02)
 - 初期実装
