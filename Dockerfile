@@ -22,6 +22,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libffi-dev \
     libssl-dev \
+    libc6-dev \
+    portaudio19-dev \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
@@ -43,7 +45,9 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 EXPOSE 8080
 
 # 非rootユーザーで実行（セキュリティのため）
-RUN useradd --create-home appuser
+RUN useradd --create-home appuser && \
+    mkdir -p /app/data && \
+    chown -R appuser:appuser /app
 USER appuser
 
 # アプリケーション起動

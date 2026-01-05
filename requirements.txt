@@ -13,7 +13,10 @@ pydantic-settings>=2.2.0
 
 # --- AIAvatarKit (v0.8.2以上必須) ---
 # 正しいインポートパス: aiavatar.adapter.linebot.server
-aiavatar-kit>=0.8.2
+aiavatar>=0.8.2
+
+# --- LINE Bot SDK ---
+line-bot-sdk>=3.0.0
 
 # --- Speech Components ---
 # VAD (Voice Activity Detection)

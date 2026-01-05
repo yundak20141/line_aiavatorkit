@@ -96,11 +96,18 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # 設定の取得ヘルパー関数
-def get_env(key: str, default: str = "") -> str:
+def get_env(key: str, default: str = ""):
     """環境変数を取得（pydantic-settings非対応時のフォールバック）"""
     if PYDANTIC_AVAILABLE and settings:
         return getattr(settings, key.lower(), os.environ.get(key, default))
     return os.environ.get(key, default)
+
+def get_bool_env(key: str, default: bool = False) -> bool:
+    """環境変数をbool型で取得"""
+    value = get_env(key, str(default))
+    if isinstance(value, bool):
+        return value
+    return str(value).lower() == "true"
 
 # --- AIAvatarKit v0.8.2のインポート ---
 AIAVATAR_AVAILABLE = False
@@ -113,7 +120,7 @@ try:
 
     # LLMサービス
     from aiavatar.sts.llm.dify import DifyService
-    from aiavatar.sts.llm.chatgpt import ChatGPTLLMService
+    from aiavatar.sts.llm.chatgpt import ChatGPTService
 
     # TTSサービス
     from aiavatar.sts.tts.voicevox import VoicevoxSpeechSynthesizer
@@ -158,7 +165,7 @@ def get_llm_service():
             api_key=dify_api_key,
             base_url=get_env("DIFY_BASE_URL", "https://api.dify.ai/v1"),
             user=get_env("DIFY_USER", "line_user"),
-            is_agent_mode=get_env("DIFY_IS_AGENT_MODE", "true").lower() == "true"
+            is_agent_mode=get_bool_env("DIFY_IS_AGENT_MODE", True)
         )
 
     elif llm_type == "CHATGPT":
@@ -166,7 +173,7 @@ def get_llm_service():
         if not openai_api_key or openai_api_key.startswith("your_"):
             raise ValueError("OPENAI_API_KEY must be set for ChatGPT LLM")
 
-        return ChatGPTLLMService(
+        return ChatGPTService(
             openai_api_key=openai_api_key,
             model=get_env("OPENAI_MODEL", "gpt-4o"),
             temperature=float(get_env("OPENAI_TEMPERATURE", "0.7")),
@@ -200,7 +207,7 @@ def get_speech_synthesizer():
         return OpenAISpeechSynthesizer(
             openai_api_key=openai_api_key,
             model=get_env("OPENAI_TTS_MODEL", "tts-1"),
-            voice=get_env("OPENAI_TTS_VOICE", "nova")
+            speaker=get_env("OPENAI_TTS_VOICE", "nova")
         )
 
     elif engine == "CARTESIA":
@@ -284,19 +291,16 @@ async def lifespan(app: FastAPI):
             else:
                 # コンポーネントの初期化
                 llm_service = get_llm_service()
-                tts_service = get_speech_synthesizer()
-                stt_service = get_speech_recognizer()
 
                 # LINE Bot Adapterの初期化（v0.8.2形式）
+                # 注意: tts/sttは直接指定不可。テキストメッセージはllmのみで処理
                 bot_server = AIAvatarLineBotServer(
                     channel_access_token=line_token,
                     channel_secret=line_secret,
                     openai_api_key=openai_key,
                     llm=llm_service,
-                    tts=tts_service,
-                    stt=stt_service,
                     system_prompt=get_env("SYSTEM_PROMPT", "あなたは親切なAIアシスタントです。"),
-                    debug=get_env("DEBUG", "false").lower() == "true"
+                    debug=get_bool_env("DEBUG", False)
                 )
 
                 # APIルーターを登録（/webhook エンドポイントが自動生成される）
@@ -316,14 +320,14 @@ async def lifespan(app: FastAPI):
                     logger.info(f"Incoming request from user: {session.user_id}")
 
                 # WebSocket Adapterの初期化（オプション）
-                if WEBSOCKET_AVAILABLE and get_env("ENABLE_WEBSOCKET", "false").lower() == "true":
+                if WEBSOCKET_AVAILABLE and get_bool_env("ENABLE_WEBSOCKET", False):
                     ws_server = AIAvatarWebSocketServer(
                         openai_api_key=openai_key,
                         llm=llm_service,
                         tts=tts_service,
                         stt=stt_service,
                         system_prompt=get_env("SYSTEM_PROMPT", "あなたは親切なAIアシスタントです。"),
-                        debug=get_env("DEBUG", "false").lower() == "true"
+                        debug=get_bool_env("DEBUG", False)
                     )
                     app.include_router(ws_server.get_websocket_router())
                     logger.info("WebSocket Adapter initialized - Endpoint: WS /ws")
